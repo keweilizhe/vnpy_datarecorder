@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from vnpy.event import Event, EventEngine
 from vnpy.trader.engine import BaseEngine, MainEngine
-from vnpy.trader.constant import Exchange
+from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import (
     SubscribeRequest,
     TickData,
@@ -16,8 +16,10 @@ from vnpy.trader.object import (
 )
 from vnpy.trader.event import EVENT_TICK, EVENT_CONTRACT, EVENT_TIMER
 from vnpy.trader.utility import load_json, save_json, BarGenerator
+from vnpy.common_util.enhanced_bar_generator import EnhancedBarGenerator
 from vnpy.trader.database import BaseDatabase, get_database, DB_TZ
 from vnpy_spreadtrading.base import EVENT_SPREAD_DATA, SpreadItem
+from vnpy.common_util.spd_logger import splog
 
 
 APP_NAME = "DataRecorder"
@@ -43,7 +45,7 @@ class RecorderEngine(BaseEngine):
 
         self.tick_recordings: dict[str, dict] = {}
         self.bar_recordings: dict[str, dict] = {}
-        self.bar_generators: dict[str, BarGenerator] = {}
+        self.bar_generators: dict[str, EnhancedBarGenerator] = {}
 
         self.timer_count: int = 0
         self.timer_interval: int = 10
@@ -56,11 +58,19 @@ class RecorderEngine(BaseEngine):
         self.filter_delta: timedelta                        # Tick数据过滤的时间偏差对象
 
         self.database: BaseDatabase = get_database()
+        self.is_testing = False
 
         self.load_setting()
         self.register_event()
         self.start()
         self.put_event()
+
+    def set_is_testing(self, is_testing: bool) -> None:
+        self.is_testing = is_testing
+        if is_testing:
+            self.timer_interval = 0
+        else:
+            self.timer_interval = 10
 
     def load_setting(self) -> None:
         """"""
@@ -94,9 +104,9 @@ class RecorderEngine(BaseEngine):
             except Empty:
                 continue
 
-            except Exception:
+            except Exception as e:
                 self.active = False
-
+                raise e
                 info: str = traceback.format_exc()
                 self.write_log(f"触发异常，录制已停止：\n{info}")
 
@@ -138,6 +148,34 @@ class RecorderEngine(BaseEngine):
         self.put_event()
 
         self.write_log(f"添加K线记录成功：{vt_symbol}")
+
+    def add_test_bar_recording(self, vt_symbol, symbol: str, exchange: Exchange, gateway_name: str) -> None:
+        """"""
+        if vt_symbol in self.bar_recordings:
+            self.write_log(f"已在K线记录列表中：{vt_symbol}")
+            return
+
+        self.bar_recordings[vt_symbol] = {
+            "symbol": symbol,
+            "exchange": exchange.value,
+            "gateway_name": gateway_name
+        }
+        self.put_event()
+        self.write_log(f"添加K线记录成功：{vt_symbol}")
+
+    def add_test_tick_recording(self, vt_symbol, symbol: str, exchange: Exchange, gateway_name: str) -> None:
+        """"""
+        if vt_symbol in self.tick_recordings:
+            self.write_log(f"已在Tick记录列表中：{vt_symbol}")
+            return
+
+        self.tick_recordings[vt_symbol] = {
+            "symbol": symbol,
+            "exchange": exchange.value,
+            "gateway_name": gateway_name
+        }
+        self.put_event()
+        self.write_log(f"添加Tick记录成功：{vt_symbol}")
 
     def add_tick_recording(self, vt_symbol: str) -> None:
         """"""
@@ -203,14 +241,15 @@ class RecorderEngine(BaseEngine):
         """"""
         # 过滤偏离本地时间戳过大的Tick数据
         tick_delta: timedelta = abs(tick.datetime - self.filter_dt)
-        if abs(tick_delta) >= self.filter_delta:
+        if not self.is_testing and abs(tick_delta) >= self.filter_delta:
+            splog.warn("datarecorder update_tick delta fail dt:%s tick:%s", str(tick_delta), str(tick))
             return
 
         if tick.vt_symbol in self.tick_recordings:
             self.record_tick(copy(tick))
 
         if tick.vt_symbol in self.bar_recordings:
-            bg: BarGenerator = self.get_bar_generator(tick.vt_symbol)
+            bg: EnhancedBarGenerator = self.get_bar_generator(tick.vt_symbol)
             bg.update_tick(copy(tick))
 
     def process_timer_event(self, event: Event) -> None:
@@ -299,12 +338,18 @@ class RecorderEngine(BaseEngine):
         """"""
         self.bars[bar.vt_symbol].append(bar)
 
-    def get_bar_generator(self, vt_symbol: str) -> BarGenerator:
+    def get_bar_generator(self, vt_symbol: str) -> EnhancedBarGenerator:
         """"""
-        bg: BarGenerator | None = self.bar_generators.get(vt_symbol, None)
+        bg: EnhancedBarGenerator | None = self.bar_generators.get(vt_symbol, None)
 
         if not bg:
-            bg = BarGenerator(self.record_bar)
+            on_bars = {
+                Interval.MINUTE: self.record_bar,
+                Interval.MINUTE_5: self.record_bar,
+                Interval.HOUR: self.record_bar,
+                Interval.DAILY: self.record_bar
+            }
+            bg = EnhancedBarGenerator(on_bars)
             self.bar_generators[vt_symbol] = bg
 
         return bg
