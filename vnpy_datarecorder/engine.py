@@ -3,7 +3,7 @@ from threading import Thread
 from queue import Queue, Empty
 from copy import copy
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 from vnpy.event import Event, EventEngine
 from vnpy.trader.engine import BaseEngine, MainEngine
@@ -252,8 +252,17 @@ class RecorderEngine(BaseEngine):
             bg: EnhancedBarGenerator = self.get_bar_generator(tick.vt_symbol)
             bg.update_tick(copy(tick))
 
+    def check_flush_bar(self):
+        now = datetime.now()
+        cur_time = now.time()
+        if cur_time > time(15, 0):
+            for bg in self.bar_generators.values():
+                bg.check_flush()
+
     def process_timer_event(self, event: Event) -> None:
         """"""
+        self.check_flush_bar()
+
         self.filter_dt = datetime.now(DB_TZ)
 
         self.timer_count += 1
